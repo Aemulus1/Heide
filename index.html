@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="nl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#eeeae1"><title>Heideschildermachine</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eeeae1;color:#302f29;font:15px system-ui,-apple-system,sans-serif}main{width:min(1190px,96%);margin:auto;padding:clamp(16px,3.5vw,44px) 0 24px}header,.bar,footer{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}h1{font:normal clamp(28px,4.2vw,58px)/1.05 Georgia,serif;letter-spacing:-.045em;margin:0}.species{font:italic 16px Georgia,serif;color:#5c584f}.mount{margin:20px 0 15px;padding:clamp(5px,.8vw,11px);background:#faf7ee;box-shadow:0 3px 15px #32291a2b}canvas{width:100%;height:auto;display:block;touch-action:none;cursor:crosshair}.bar{justify-content:flex-start}button,select{font:inherit;color:inherit;background:#f8f5ed;border:1px solid #b6b2a5;border-radius:6px;padding:10px 13px;min-height:44px;cursor:pointer}button:disabled{opacity:.45;cursor:default}.primary{background:#494d39;color:#fff;border-color:#494d39}label{display:flex;align-items:center;gap:8px}footer{margin-top:14px;color:#5e5a4e;font-size:13px}#status{margin:0}small{font-family:Georgia,serif;font-style:italic}@media(max-width:620px){main{width:96%}.species{font-size:14px}.bar{gap:6px}button,select{font-size:14px;padding:8px}.mount{margin:13px 0}}
+</style><main><header><h1>Heideschildermachine</h1><span class="species">Limburgse heide</span></header>
+<div class="mount"><canvas id="art" width="1360" height="800" aria-label="Doek voor een heidelandschap. Teken een pad of kies Voorbeeldpad."></canvas></div>
+<div class="bar"><button id="paint" class="primary" disabled>Schilder de heide</button><button id="example">Voorbeeldpad</button><button id="new">Nieuw doek</button><label>Licht <select id="light"><option>Late zomer</option><option>Ochtendnevel</option><option>Avondgloed</option></select></label><button id="save" disabled>Bewaar PNG</button></div>
+<footer><p id="status" role="status"></p><small>by Kris &amp; Omnia 2026</small></footer></main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), canvas=$('art'), ctx=canvas.getContext('2d'), W=canvas.width,H=canvas.height;
+const mask=document.createElement('canvas');mask.width=W;mask.height=H;const mc=mask.getContext('2d',{willReadFrequently:true});
+let seed,rand,path=[],draft=[],pointer=null,mode='edit',token=0,pixels,theme=0;
+const palettes=[
+ ['#5385b5','#c6d3df','#929792','#807d78','#8a826a','#80674e','#b79488','#e3c2ad'],
+ ['#a5b8ba','#eee8da','#a3a9a1','#97968c','#92917c','#796e59','#aea09e','#dbcfbd'],
+ ['#8e90aa','#f5c8a5','#a29294','#887e81','#9a8262','#87694f','#ca999d','#f0cba6']];
+function rng(s){return ()=>{s=(s+0x6D2B79F5)|0;let t=Math.imul(s^s>>>15,1|s);t=(t+Math.imul(t^t>>>7,61|t))^t;return ((t^t>>>14)>>>0)/4294967296}}
+function horizon(x){return 460+13*Math.sin(x*.005+seed%9)+5*Math.sin(x*.012)}
+function depth(x,y){return Math.max(0,Math.min(1,(y-horizon(x))/(H-horizon(x))))}
+function stroke(x,y,u,v,color,width=1){ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(u,v);ctx.stroke()}
+function oval(x,y,rx,ry,c){ctx.fillStyle=c;ctx.beginPath();ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2);ctx.fill()}
+function base(){const p=palettes[theme],grad=ctx.createLinearGradient(0,0,0,475);grad.addColorStop(0,p[0]);grad.addColorStop(1,p[1]);ctx.fillStyle=grad;ctx.fillRect(0,0,W,H);
+ const soil=ctx.createLinearGradient(0,280,0,H);soil.addColorStop(0,p[3]);soil.addColorStop(.4,p[4]);soil.addColorStop(1,p[5]);ctx.fillStyle=soil;ctx.beginPath();ctx.moveTo(0,H);for(let x=0;x<=W;x+=4)ctx.lineTo(x,horizon(x));ctx.lineTo(W,H);ctx.fill()}
+let cloudCache;
+function makeClouds(){
+  const random=rng(seed), table=new Float32Array(256*256);
+  for(let i=0;i<table.length;i++)table[i]=random();
+  function noise(x,y){
+    const ix=Math.floor(x),iy=Math.floor(y);
+    let fx=x-ix,fy=y-iy;fx*=fx*(3-2*fx);fy*=fy*(3-2*fy);
+    const a=(iy&255)*256,b=((iy+1)&255)*256,l=ix&255,r=(ix+1)&255;
+    return (table[a+l]*(1-fx)+table[a+r]*fx)*(1-fy)+(table[b+l]*(1-fx)+table[b+r]*fx)*fy;
+  }
+  function texture(x,y){
+    return noise(x,y)*.52+noise(x*2.06+31,y*2.06)*.255+noise(x*4.3,y*4.3+67)*.13+noise(x*8.8+98,y*8.8)*.065+noise(x*18,y*18)*.03;
+  }
+  const layer=document.createElement('canvas');layer.width=W/2;layer.height=235;
+  const brush=layer.getContext('2d'),img=brush.createImageData(layer.width,layer.height);
+  const shadows=[[147,161,184],[181,186,188],[170,148,163]][theme];
+  const lights=[[251,250,246],[245,243,234],[255,224,197]][theme];
+  const clamp=v=>Math.min(1,Math.max(0,v));
+  for(let y=0;y<layer.height;y++){
+    const distance=y/layer.height,scale=1+1.45*distance**3;
+    for(let x=0;x<layer.width;x++){
+      const u=x*scale*.011,v=y*.025*(1+.85*distance**2);
+      const warp=noise(u*.63+13,v*.54+23);
+      const density=texture(u+warp*.85,v+warp*.35);
+      const opacity=clamp((density-.488)*12)*clamp((1-distance)*14);
+      if(opacity===0)continue;
+      const above=texture(u+warp*.85-.13,v+warp*.35-.23);
+      const light=clamp(.53+(density-above)*3.4+(noise(u*.8,v*.85+62)-.5)*.52);
+      const at=4*(y*layer.width+x);
+      for(let c=0;c<3;c++)img.data[at+c]=shadows[c]+(lights[c]-shadows[c])*light;
+      img.data[at+3]=255*opacity*(theme===1?.75:.96);
+    }
+  }
+  brush.putImageData(img,0,0);return layer;
+}
+function sky(){const p=palettes[theme];
+ if(!cloudCache||cloudCache.seed!==seed||cloudCache.theme!==theme)cloudCache={seed,theme,layer:makeClouds()};
+ ctx.drawImage(cloudCache.layer,0,0,W,470);
+ // Keep terrain and vegetation on the established random sequence.
+ for(let i=0;i<15*(3+25*3);i++)rand();
+ for(let k=0;k<3;k++){ctx.fillStyle=[p[2],p[3],p[4]][k];ctx.globalAlpha=.45+k*.15;ctx.beginPath();ctx.moveTo(0,500);for(let x=0;x<=W;x+=3){let h=(4+7*Math.sin(x*.009+k*4)+4*Math.sin(x*.041+k))*((3-k)/3);ctx.lineTo(x,horizon(x)-4-(2-k)*6-h-rand()*4)}ctx.lineTo(W,500);ctx.fill()}ctx.globalAlpha=1;
+}
+function pine(x,y,s){ctx.save();ctx.translate(x,y);ctx.scale(s,s);let bark='#584939';stroke(0,0,-7,-47,bark,6);stroke(-7,-47,0,-93,bark,4);stroke(0,-93,-9,-125,bark,2);
+ for(let i=0;i<19;i++){let h=51+rand()*71,side=i%2?1:-1,len=(.45+rand()*.55)*(135-h)*.69,ex=-4+side*len,ey=-h-5-rand()*11;stroke(-4,-h,ex,ey,bark,1.7);for(let j=0;j<85;j++){let a=rand()*6.28,r=Math.sqrt(rand());let xx=ex+Math.cos(a)*r*(8+len*.36),yy=ey+Math.sin(a)*r*(3+len*.12);stroke(xx,yy,xx+rand()*4,yy-1-rand()*2,['#4d5142','#565d48','#666d51','#787859'][j%4],1.5)}}ctx.restore()}
+function widthAt(x,y){return 1.6+62*Math.pow(depth(x,y),1.33)}
+function drawPath(c,points,color){if(points.length<2)return;c.fillStyle=color;c.strokeStyle=color;c.lineCap='round';
+ for(let i=1;i<points.length;i++){let a=points[i-1],b=points[i],steps=Math.max(1,Math.ceil(Math.hypot(b.x-a.x,b.y-a.y)/3));for(let j=1;j<=steps;j++){let f=j/steps,x=a.x+(b.x-a.x)*f,y=a.y+(b.y-a.y)*f;if(y<horizon(x))continue;c.beginPath();c.arc(x,y,widthAt(x,y),0,Math.PI*2);c.fill()}}}
+function edit(){rand=rng(seed);base();sky();ctx.lineWidth=1;ctx.save();ctx.globalAlpha=.67;drawPath(ctx,draft.length?draft:path,'#ecdbbd');ctx.restore();$('paint').disabled=path.length<2;$('save').disabled=true}
+function status(s){$('status').textContent=s}
+function reset(){token++;seed=Math.floor(Math.random()*1e8);path=[];draft=[];pointer=null;mode='edit';theme=$('light').selectedIndex;edit();status('Trek met je vinger een zandpad onder de horizon. Je mag opnieuw tekenen.')}
+function example(){token++;mode='edit';path=[];draft=[];pointer=null;let dir=seed%2?1:-1;for(let i=0;i<=150;i++){let d=i/150,x=W*(.51+dir*(.28*d+.15*Math.sin(d*7)*d));path.push({x,y:horizon(x)+d*(H+5-horizon(x))})}edit();status('Dit pad is klaar. Schilder de heide of teken zelf een ander pad.')}
+function pos(e){let b=canvas.getBoundingClientRect();return{x:Math.max(0,Math.min(W,(e.clientX-b.left)*W/b.width)),y:Math.max(0,Math.min(H,(e.clientY-b.top)*H/b.height))}}
+canvas.onpointerdown=e=>{if(mode!=='edit'||pointer!==null)return;let q=pos(e);if(q.y<horizon(q.x)){status('Begin je pad in de aarde, onder de horizon.');return}pointer=e.pointerId;canvas.setPointerCapture(pointer);draft=[q];edit()};
+canvas.onpointermove=e=>{if(pointer!==e.pointerId)return;let q=pos(e);q.y=Math.max(q.y,horizon(q.x));let a=draft.at(-1);if(Math.hypot(q.x-a.x,q.y-a.y)<2)return;draft.push(q);drawPath(ctx,[a,q],'#e6d1ae')};
+canvas.onpointerup=e=>{if(pointer!==e.pointerId)return;pointer=null;if(draft.length>1){path=draft;status('Pad getekend. Kies het licht en druk op Schilder de heide.')}draft=[];edit()};
+canvas.onpointercancel=()=>{pointer=null;draft=[];if(mode==='edit')edit()};
+function onSand(x,y){let ix=Math.floor(x),iy=Math.floor(y);return ix>=0&&iy>=0&&ix<W&&iy<H&&pixels[4*(iy*W+ix)+3]>90}
+function field(x,y){let s=seed%200;return Math.sin(x*.012+y*.021+s)*.5+Math.sin(x*.028-y*.048+s*.3)*.28+Math.sin(x*.061+y*.072)*.12+.1*Math.cos(x*.004-y*.009)}
+// A continuous wash joins the individual shrubs into drifts, even at the horizon.
+const heathTones=[
+  [[79,82,56],[111,76,87],[152,115,128]],
+  [[114,123,100],[140,120,133],[178,156,168]],
+  [[107,99,69],[145,97,111],[188,134,148]]
+];
+function heathWash(){
+  const wash=document.createElement('canvas');
+  wash.width=W/4;wash.height=H/4;
+  const brush=wash.getContext('2d'), image=brush.createImageData(wash.width,wash.height);
+  const [moss,bloom,light]=heathTones[theme];
+  for(let j=0;j<wash.height;j++)for(let i=0;i<wash.width;i++){
+    const x=i*4,y=j*4;
+    if(y<horizon(x)-5)continue;
+    const d=depth(x,y),patch=field(x,y),f=Math.min(1,Math.max(0,(patch+.55)*1.32));
+    const haze=.40*(1-Math.sqrt(d)),glow=.22*Math.max(0,patch)+haze;
+    const at=4*(j*wash.width+i);
+    for(let c=0;c<3;c++)image.data[at+c]=(moss[c]*(1-f)+bloom[c]*f)*(1-glow)+light[c]*glow;
+    const clearing=Math.max(0,Math.min(1,(-patch+.07)*2.25))*Math.sqrt(d);
+    const soil=[145,133,91];
+    for(let c=0;c<3;c++)image.data[at+c]+=clearing*(soil[c]-image.data[at+c]);
+    image.data[at+3]=255;
+  }
+  brush.putImageData(image,0,0);
+  ctx.save();ctx.beginPath();ctx.moveTo(0,H);
+  for(let x=0;x<=W;x+=4)ctx.lineTo(x,horizon(x));
+  ctx.lineTo(W,H);ctx.closePath();ctx.clip();ctx.drawImage(wash,0,0,W,H);ctx.restore();
+}
+function heather(x,y,d,patch){
+  const scale=.9+Math.pow(d,1.24)*46;
+  const h=scale*(.48+.76*rand()), w=h*(1.6+rand()*1.05);
+  const waviness=rand()*6.28,tilt=(rand()-.5)*.35;
+  const bloom=Math.min(.96,Math.max(.12,.70+patch*.46+(rand()-.5)*.42));
+  const pigments=[
+    ['#513e39','#684943','#805563','#995e7b','#b67aa0','#d298b6'],
+    ['#635557','#776570','#8f7889','#a484a1','#bf9cb7','#d9b9cd'],
+    ['#563d38','#764b49','#925867','#aa687d','#c88898','#e6a8b1']
+  ][theme];
+  const rim=t=>Math.sqrt(Math.max(0,1-t*t))*(.84+.12*Math.sin(5*t+waviness)+.075*Math.sin(11*t-waviness))+tilt*t*(1-t*t);
+  // Cast shadow on the ground, with the darkest contact directly under the crown.
+  for(let k=3;k>=1;k--)oval(x+w*.18,y+h*.04,w*(.83+.09*k),h*(.13+.04*k),'rgba(48,39,30,.10)');
+  ctx.beginPath();ctx.moveTo(x-w,y);
+  for(let i=0;i<=36;i++){let t=i/18-1;ctx.lineTo(x+w*t,y-h*rim(t))}
+  for(let i=20;i>=0;i--){let t=i/10-1;ctx.lineTo(x+w*t,y+h*.10*Math.sqrt(1-t*t))}
+  ctx.closePath();
+  const canopy=ctx.createLinearGradient(x,y-h,x+w*.14,y+h*.1);
+  canopy.addColorStop(0,pigments[4]);canopy.addColorStop(.43,pigments[3]);
+  canopy.addColorStop(.78,pigments[2]);canopy.addColorStop(1,pigments[0]);
+  ctx.fillStyle=canopy;ctx.fill();
+  const bark=['#946f42','#998667','#ac7540'][theme];
+  const violet=['#824779','#967c98','#914f73'][theme];
+  const warm=['#dfad81','#d7c6ae','#f1b46b'][theme];
+  // Neighbouring sprays grow from shared forks. Light follows their outer faces.
+  const sprays=Math.ceil(4+w*h*.021);
+  for(let i=0;i<sprays;i++){
+    const t=rand()*1.88-.94,lift=.12+.72*rand(),crown=rim(t);
+    const bx=x+t*w,by=y-h*crown*lift;
+    const length=h*(.21+rand()*.3),lean=(.13+t*.72+(rand()-.5)*.48)*length;
+    const forkX=bx+lean*.45,forkY=by-length*.48;
+    const sunny=.45*lift+.23*(1-t)+.18*Math.sin(t*8+waviness)+.20*rand();
+    stroke(bx,by,forkX,forkY,sunny>.58?bark:pigments[0],.5+.9*d);
+    const branches=d<.13?1:2+Math.floor(rand()*2);
+    for(let k=0;k<branches;k++){
+      const tx=bx+lean+(k-(branches-1)/2)*length*.30,ty=by-length*(.8+.3*rand());
+      stroke(forkX,forkY,tx,ty,sunny>.68?bark:pigments[1],.43+.52*d);
+      if(rand()>.46+.54*bloom)continue;
+      const marks=2+Math.floor(d*3);
+      const hue=rand();
+      for(let m=0;m<marks;m++){
+        const f=.20+.8*m/Math.max(1,marks-1),side=m%2?1:-1;
+        const xx=forkX+(tx-forkX)*f,yy=forkY+(ty-forkY)*f;
+        const size=(.5+2.35*d)*(.75+.5*rand())*(1-.26*f);
+        let ink=hue<.29?violet:pigments[3];
+        if(sunny+f*.28>.64)ink=hue<.40?violet:pigments[4];
+        if(sunny+f*.30>.89)ink=pigments[5];
+        if(m===marks-1&&sunny>.69&&rand()<(theme===2?.24:.09))ink=warm;
+        ctx.fillStyle=ink;ctx.beginPath();ctx.moveTo(xx,yy+size*.34);
+        ctx.lineTo(xx+side*size*.94,yy-size*.22);
+        ctx.lineTo(xx+side*size*.73,yy-size*1.12);
+        ctx.lineTo(xx-side*size*.15,yy-size*.53);ctx.closePath();ctx.fill();
+      }
+    }
+  }
+}
+function shrub(x,ground,height,width){
+ const random=rng((seed+Math.round(x*149+ground*47))>>>0);
+ const tones=[
+   ['#293830','#384c40','#4e6350','#6a7b5b','#8b986b'],
+   ['#48564e','#596b5e','#708171','#899683','#a7af94'],
+   ['#353a30','#50553c','#676b47','#8a8957','#ada46b']
+ ][theme];
+ const lean=(random()-.5)*width*.34;
+ const phase=random()*Math.PI*2;
+ ctx.save();ctx.translate(x,ground);
+ oval(width*.12,0,width*.48,height*.027,'rgba(52,40,33,.22)');
+ const detail=height>70, leaders=detail?5:3;
+ for(let k=0;k<leaders;k++){
+   const side=(k===leaders-1?0:(k%2?1:-1)*(.28+.52*random()));
+   const tall=height*(1-Math.abs(side)*(.40+.23*random()));
+   const base=side*width*.12, spread=side*width*.44+lean;
+   const axis=t=>base+spread*t+width*.024*Math.sin(t*4+phase)*t;
+   stroke(base,0,axis(.53),-tall*.53,'#574d3d',Math.max(.5,width*.019));
+   stroke(axis(.53),-tall*.53,axis(1),-tall,'#494b3c',Math.max(.35,width*.009));
+   const tiers=detail?24:12;
+   for(let i=0;i<tiers;i++){
+     const t=.07+.91*(i+random()*.65)/tiers;
+     const dir=i%2?1:-1, ax=axis(t),ay=-tall*t;
+     const reach=dir*width*(.19+.13*random())*(1-.83*t)*(.85+.15*Math.sin(phase+9*t));
+     const lift=tall*(.055+.10*random())*(1-.54*t);
+     const lit=random()*.40+(dir<0?.23:.06)+t*.27;
+     stroke(ax,ay,ax+reach*.63,ay-lift*.36,'#525342',Math.max(.32,width*.007*(1-t)));
+     const sprays=detail?10:6;
+     for(let j=0;j<sprays;j++){
+       const f=(j+random()*.7)/sprays;
+       const bx=ax+reach*f,by=ay-lift*f*(.3+.7*f);
+       const len=(Math.abs(reach)*.36+lift*.30)*(.65+.6*random());
+       const dx=reach*.13+len*(random()-.45),dy=-len*(.72+.53*random());
+       const breadth=len*(.17+.15*random());
+       // A tapered leafy spray, with a jagged edge made of paired side shoots.
+       ctx.fillStyle=tones[lit+random()*.32>.69?2:lit>.34?1:0];
+       ctx.beginPath();ctx.moveTo(bx,by);
+       for(const sign of [-1,1]){
+         for(let n=0;n<6;n++){
+           const u=sign<0?(n+1)/7:1-(n+1)/7;
+           const fringe=breadth*Math.sin(u*Math.PI)*(n%2?.48:1);
+           ctx.lineTo(bx+dx*u+sign*fringe,by+dy*u-fringe*.35);
+         }
+         if(sign<0)ctx.lineTo(bx+dx,by+dy);
+       }
+       ctx.closePath();ctx.fill();
+       const needles=detail?7:2;
+       for(let n=0;n<needles;n++){
+         const u=random(),s=n%2?1:-1,ox=bx+dx*u,oy=by+dy*u;
+         const l=breadth*(.28+.78*random())*(1-.6*u);
+         const shine=lit+u*.19+random()*.23;
+         stroke(ox,oy,ox+s*l+dx*.13,oy-l*.85+dy*.12,tones[shine>.96?4:shine>.70?3:2],Math.max(.28,.33+height*.0027));
+       }
+     }
+   }
+ }
+ ctx.restore();
+}
+// Birch trunk, crown, palette and knife marks from Kris Truyers' Bosmieren II v11.52.
+function birch(x,ground,height){
+ const random=rng((seed+Math.round(x*97+ground*53))>>>0);
+ const rnd=(lo,hi)=>lo+(hi-lo)*random(),pick=values=>values[Math.floor(random()*values.length)];
+ const frontLeafColors=[
+   ['#494b30','#656635','#898141','#b4a153'],
+   ['#555e50','#73806a','#959a7a','#b1b18b'],
+   ['#574b31','#786636','#a58440','#c4a05a']
+ ][theme],ops=[];
+ function ribbon(left,right,color){ops.push({points:left.concat(right.reverse()),color,alpha:1})}
+ function stroke(x1,y1,x2,y2,w,color,alpha){ops.push({x:(x1+x2)/2,y:(y1+y2)/2,l:Math.hypot(x2-x1,y2-y1),a:Math.atan2(y2-y1,x2-x1),w,color,alpha})}
+ function mark(x,y,l,w,a,color,alpha){ops.push({x,y,l,w,a,color,alpha})}
+function buildReferenceBirch(x,base,top,scale,lean){
+ const h=base-top;
+ const thick=rnd(28,37)*scale;
+ const drift=(lean+rnd(-.022,.022))*h;
+ const phase=rnd(0,6.283);
+ const bend=rnd(-11,11)*scale;
+ const cx=t=>x+drift*t+bend*Math.sin(t*Math.PI)+Math.sin(t*9+phase)*3.4*scale;
+ const cy=t=>base-h*t;
+ const width=t=>thick*(1-.30*t)*(1+.045*Math.sin(7*t+phase))*Math.pow(Math.max(.004,(1-t)/.30),t>.70?1.65:0);
+ // Doorlopende stam, zonder ronde stomp: doorsnede loopt in de wortelaanzet over.
+ const edges=[],shade=[],lit=[];
+ for(let i=0;i<=70;i++){
+   const t=i/70,w=width(t);
+   edges.push([cx(t)-w*.48,cy(t)]);
+   shade.push([cx(t)+w*.48,cy(t)]);
+   lit.push([cx(t)+w*.12,cy(t)]);
+ }
+ ribbon(edges,shade,'#95897b');ribbon(edges,lit,'#e5d7bb');
+ const N=190;
+ for(let j=0;j<N;j++){
+  const t=j/N,u=(j+1)/N,w=width(t),wu=width(u);
+  stroke(cx(t),cy(t),cx(u),cy(u),w,'#b4a99b',.42);
+  stroke(cx(t)-w*.12,cy(t),cx(u)-wu*.12,cy(u),w*.72,'#f1e0c2',.63);
+  stroke(cx(t)+w*.34,cy(t),cx(u)+wu*.34,cy(u),w*.14,'#7f898b',.58);
+ }
+ // Grijze, onregelmatige schorspartijen: niet één effen witte cilinder.
+ for(let i=0;i<175;i++){
+  const t=rnd(.025,.97),w=width(t),side=rnd(-.39,.39);
+  const len=rnd(9,70)*scale,du=Math.min(.985,t+len/h);
+  const grey=pick(['#858f90','#9ba4a2','#aeb4b1','#777f7e','#c0c3bd']);
+  stroke(cx(t)+side*w,cy(t),cx(du)+side*width(du)+rnd(-3,3)*scale,cy(du),
+   rnd(2.5,Math.max(3,w*.24)),grey,rnd(.18,.53));
+ }
+ // Geen gelijkmatige horizontale streepjes: grillige schorsvelden van wisselende grootte.
+ // Zwart ontstaat in onderbroken, soms verticaal uitlopende rafelvlekken.
+ const patches=Math.round(34*h/750);
+ for(let i=0;i<patches;i++){
+  const t=rnd(.016,.97),w=width(t),side=rnd(-.36,.36);
+  const x0=cx(t)+side*w,y0=cy(t);
+  const broad=random()<.44;
+  const length=Math.min(w*.80,rnd(broad?24:6,broad?64:22)*scale);
+  const depth=rnd(broad?22:4,broad?64:15)*scale;
+  const dark=pick(['#171a19','#262a29','#343936','#4a504c']);
+  // Korte dwarslittekens naast grotere grillige zwarte vlakken.
+  const seg=3+Math.floor(rnd(0,5));
+  let lastX=x0-length*.5,lastY=y0;
+  for(let k=1;k<=seg;k++){
+   const u=k/seg,xx=x0-length*.5+length*u+rnd(-2,2)*scale;
+   const yy=y0+Math.sin(u*Math.PI)*rnd(-depth,depth)*.42+rnd(-2.5,2.5)*scale;
+   stroke(lastX,lastY,xx,yy,rnd(broad?5:1.4,broad?14:4.3)*scale,dark,rnd(.72,1));
+   lastX=xx;lastY=yy;
+  }
+  if(broad){
+   for(let k=0;k<Math.floor(rnd(10,22));k++){
+    const xx=x0+rnd(-length*.42,length*.42),yy=y0+rnd(-depth*.48,depth*.48);
+    mark(xx,yy,rnd(5,16)*scale,rnd(1.5,5)*scale,rnd(-1.1,1.1),dark,rnd(.48,.91));
+   }
+  }
+ }
+ // Lange, smalle schaduwen en zachte droge messtreken volgen de lengte van de schors.
+ for(let i=0;i<115;i++){
+  const t=rnd(.02,.96),len=rnd(7,95)/h*scale;
+  const u=Math.min(.995,t+len),side=rnd(-.43,.43);
+  const shade=pick(['#d4d5d0','#a8b0af','#899696','#c3c7c2','#737e7c']);
+  stroke(cx(t)+side*width(t),cy(t),cx(u)+side*width(u)+rnd(-3,3)*scale,cy(u),rnd(.6,3.5)*scale,shade,rnd(.18,.7));
+ }
+ // Stamvoet en gedeeltelijk door bladstrooisel bedekte wortels.
+ // De wortels zijn onderbroken; de reeds geschilderde bodem blijft zichtbaar.
+ for(let j=0;j<7;j++){
+  const side=j%2?1:-1,origin=cx(0)+side*thick*rnd(.19,.32);
+  const reach=rnd(30,91)*scale,drop=rnd(8,23)*scale;
+  const x0=origin,y0=base-rnd(9,21)*scale;
+  const x1=origin+side*reach,y1=base+drop;
+  const w0=rnd(5,11)*scale;
+  // Breed begin loopt vloeiend uit de stamvoet.
+  stroke(x0,y0,x0+side*reach*.20,base+drop*.08,w0,'#b6b9b2',.94);
+  // Afwisselend zichtbare fragmenten: geen nieuwe grondverf of bladeren.
+  for(let k=1;k<6;k++){
+   if(k===2||k===4||(k===3&&j%3===0))continue;
+   const t0=k/6,t1=Math.min(.98,(k+.72)/6);
+   const xa=x0+(x1-x0)*t0,xb=x0+(x1-x0)*t1;
+   const ya=y0+(y1-y0)*t0,yb=y0+(y1-y0)*t1;
+   stroke(xa,ya,xb,yb,Math.max(.8,w0*(1-t0)*.68),'#8d9790',.79);
+  }
+ }
+ const branchStart=ops.length;
+ // Schaarse dunne zijtakken, geen volle ronde illustratieve kruin.
+ for(let i=0;i<17;i++){
+  const t=rnd(.66,.99),side=random()<.5?-1:1;
+  const px=cx(t),py=cy(t),reach=rnd(26,112)*scale;
+  const rise=rnd(-13,48)*scale;
+  const tipX=px+side*reach,tipY=py-rise;
+  stroke(px,py,px+side*reach*.46,py-rise*.32,rnd(1.8,4.5)*scale,'#6f7168',.86);
+  stroke(px+side*reach*.46,py-rise*.32,tipX,tipY,rnd(.5,1.7)*scale,'#6f7168',.8);
+  for(let k=0;k<24;k++){
+   const a=rnd(.45,1.05);
+   mark(px+side*reach*a+rnd(-16,16)*scale,py-rise*a+rnd(-17,17)*scale,
+    rnd(4,12)*scale,rnd(1.5,4)*scale,rnd(-3,3),
+    pick(frontLeafColors),rnd(.36,.72));
+  }
+ }
+ for(let i=branchStart;i<ops.length;i++)ops[i].outsideTrunk=true;
+ return t=>({x:cx(t),y:cy(t),width:width(t)});
+}
+function buildCrown(type,x,base,top,scale,trunkPath,{crownScale=1,leafDensity=1,middleBirch=false,curvedBranches=false}={}){
+ const h=base-top;
+ const R=(type==='oak'?190:type==='beech'?151:type==='pine'?139:110)*scale*crownScale*(middleBirch?1.6:1);
+ const pal=frontLeafColors,wood=type==='birch'?'#75766d':type==='pine'?'#705037':type==='oak'?'#403126':'#615849';
+ const centerX=trunkPath(.90).x;
+ const cy=top+R*(type==='pine'?.57:.28);
+ // Elk exemplaar heeft een andere asymmetrische buitenlijn, geen uniforme bol.
+ const clusters=[];
+ // Een doorgaande spil met verspringende bladgroepen en een losse, smalle top.
+ const n=19;
+ for(let i=0;i<n;i++){
+   const t=(i+rnd(.10,.90))/n;
+   const span=Math.pow(Math.sin(Math.PI*(.07+.91*t)),.78)*(1-.36*t);
+   const side=i%2?1:-1;
+   const axis=trunkPath(.52+.48*t).x;
+   const px=axis+side*R*span*rnd(.28,.77);
+   const apicalGrowth=(h>=700?.18:.09)*t*t;
+   const py=base-h*(.54+.59*t+apicalGrowth);
+   clusters.push({x:px,y:py,rx:R*(.06+.27*span)*rnd(.76,1.13),ry:R*(.10+.31*span)*rnd(.78,1.18)});
+ }
+ // De stam is geen paal met een vlak eind: twee doorlopende leiders groeien
+ // uit de bovenste stam en worden steeds dunner tot twijgen in de kruin.
+ // Schors van de hoofdstam blijft ongewijzigd; deze takken zijn nieuw.
+ const leaders=type==='oak'?3:type==='beech'?3:type==='birch'?2:2;
+ const trunkTopY=top;
+ const leaderStartY=base-h*(type==='oak'?.66:.76);
+ for(let j=0;j<leaders;j++){
+  const side=j%2===0?-1:1;
+  const startX=trunkPath(type==='oak'?.66:.76).x;
+  const tipX=centerX+side*R*rnd(.26,.68);
+  const tipY=cy-R*rnd(.30,.72)-h*(h>=700?.16:.08);
+  const startW=(type==='oak'?23:type==='beech'?15:type==='birch'?12:10)*scale;
+  let px=startX,py=leaderStartY;
+  for(let k=1;k<=16;k++){
+   const u=k/16;
+   const nx=startX+(tipX-startX)*(u*u*(3-2*u))+Math.sin(u*Math.PI)*side*R*.09;
+   const ny=leaderStartY+(tipY-leaderStartY)*u;
+   const bw=Math.max(.5,startW*Math.pow(1-u,1.45));
+   stroke(px,py,nx,ny,bw,wood,.96);
+   ops[ops.length-1].crownReach=[(k-1)/16,u];
+   if(type==='oak'&&bw>3.2*scale)ops.push({kind:'oakBranchBark',x1:px,y1:py,x2:nx,y2:ny,w:bw,seed:Math.floor(rnd(1,1000000)),alpha:1});
+   px=nx;py=ny;
+  }
+ }
+ // Korte verfstreken volgen de kromming van de tak en worden naar de top dunner.
+ function curvedBranch(sx,sy,mx,my,ex,ey,width,color,alpha){
+  let px=sx,py=sy;
+  const steps=10;
+  for(let k=1;k<=steps;k++){
+   const t=k/steps,u=1-t;
+   const nx=u*u*sx+2*u*t*mx+t*t*ex;
+   const ny=u*u*sy+2*u*t*my+t*t*ey;
+   stroke(px,py,nx,ny,Math.max(.45,width*(1-.8*t)),color,alpha);
+   ops[ops.length-1].crownReach=[((k-1)/steps)**1.6,t**1.6];
+   px=nx;py=ny;
+  }
+ }
+ // Vertakkingen lopen vanaf de echte stam omhoog en zijwaarts tot in de kroon.
+ // De dikte neemt langs elke tak geleidelijk af.
+ for(const c of clusters){
+  const attach=rnd(.68,.95),origin=trunkPath(attach),sx=origin.x,sy=origin.y;
+  const midx=sx+(c.x-sx)*rnd(.40,.62),midy=sy+(c.y-sy)*rnd(.38,.63)-rnd(0,22)*scale;
+  const w=type==='oak'?rnd(7,13)*scale:type==='pine'?rnd(3,6)*scale:rnd(2.5,6)*scale;
+  if(curvedBranches)curvedBranch(sx,sy,midx,midy,c.x,c.y,w,wood,.9);
+  else{
+   stroke(sx,sy,midx,midy,w,wood,.9);
+   ops[ops.length-1].crownReach=[0,1];
+   stroke(midx,midy,c.x,c.y,Math.max(.8,w*.38),wood,.88);
+  }
+  if(type==='oak'){
+   ops.push({kind:'oakBranchBark',x1:sx,y1:sy,x2:midx,y2:midy,w,seed:Math.floor(rnd(1,1000000)),alpha:1});
+   if(w*.38>3.2*scale)ops.push({kind:'oakBranchBark',x1:midx,y1:midy,x2:c.x,y2:c.y,w:w*.38,seed:Math.floor(rnd(1,1000000)),alpha:1});
+  }
+  for(let j=0;j<3;j++){
+   const ex=c.x+rnd(-c.rx*.85,c.rx*.85),ey=c.y+rnd(-c.ry*.8,c.ry*.8);
+   stroke(c.x,c.y,ex,ey,rnd(.6,1.9)*scale,wood,.75);
+  }
+ }
+ // Alleen berk: extra fijn, frisgroen loof langs zichtbare, licht hangende
+ // zijtwijgen. De bestaande kruin, stam, schors en andere soorten blijven intact.
+ const twigLeaves=middleBirch?2*Math.round(20*leafDensity):110;
+ if(type==='birch'&&leafDensity>0){
+  const birchLeafColors=frontLeafColors;
+  for(let b=0;b<17;b++){
+   const t=rnd(.72,.98),anchor=trunkPath(t);
+   const side=b%2===0?-1:1;
+   const reach=rnd(39,91)*scale*(middleBirch?1.65:1);
+   const rise=rnd(6,26)*scale;
+   const endX=anchor.x+side*reach,endY=anchor.y-rise+rnd(8,24)*scale;
+   // Fijne twijg buigt naar buiten en aan het uiteinde iets naar beneden.
+   const midX=anchor.x+side*reach*.62,midY=anchor.y-rise-rnd(4,12)*scale;
+   const twigWidth=rnd(.65,1.35)*scale,tipWidth=rnd(.4,.85)*scale;
+   if(curvedBranches)curvedBranch(anchor.x,anchor.y,midX,midY,endX,endY,twigWidth,'#85887b',.66);
+   else{
+    stroke(anchor.x,anchor.y,midX,midY,twigWidth,'#85887b',.66);
+    ops[ops.length-1].crownReach=[0,1];
+    stroke(midX,midY,endX,endY,tipWidth,'#777e70',.60);
+   }
+   for(let k=0;k<twigLeaves;k++){
+    const u=rnd(.48,1.12);
+    const lx=anchor.x+side*reach*u+rnd(-17,17)*scale;
+    const ly=anchor.y-rise*u+Math.max(0,u-.55)*rnd(8,31)*scale+rnd(-17,17)*scale;
+    mark(lx,ly,rnd(4.5,10)*scale,rnd(1.6,3.8)*scale,rnd(-2.7,2.7),
+      pick(birchLeafColors),rnd(.62,.94));
+   }
+  }
+ }
+ // De boomtop blijft een organische verzameling van overlappende blad- of naaldpartijen.
+ // De bovengrens bij stand 0 raakt het doek; bij stand 5 ligt ze erbuiten.
+ let remainingBirchLeaves=2*Math.round(12*145*leafDensity)-17*twigLeaves;
+ for(const [index,c] of clusters.entries()){
+  const density=middleBirch?Math.round(remainingBirchLeaves/(clusters.length-index)):2*Math.round((type==='pine'?105:type==='birch'?100:145)*leafDensity);
+  if(middleBirch)remainingBirchLeaves-=density;
+  for(let j=0;j<density;j++){
+   const theta=rnd(0,Math.PI*2),r=Math.sqrt(random());
+   const xx=c.x+Math.cos(theta)*c.rx*r,yy=c.y+Math.sin(theta)*c.ry*r;
+   const a=type==='pine'?rnd(-1.4,1.4):rnd(-3.14,3.14);
+   const len=type==='pine'?rnd(7,18)*scale:type==='birch'?rnd(5,12)*scale:rnd(7,18)*scale;
+   const wid=type==='pine'?rnd(.8,2)*scale:type==='birch'?rnd(1.7,4)*scale:rnd(2.5,6.5)*scale;
+   mark(xx,yy,len*(middleBirch?1.45:1),wid*(middleBirch?2:1),a,
+    type==='birch' && random()<.30 ? pick(frontLeafColors.slice(2)) : pick(pal),rnd(.53,.93));
+  }
+ }
+ if(type==='birch' && h===720){
+   const inner=rng((seed+Math.round(centerX*391))>>>0);
+   const spine=clusters.slice(8);
+   for(let i=0;i<spine.length-1;i++){
+     const left=spine[i],right=spine[i+1];
+     const cx=(left.x+right.x)*.5, yy=(left.y+right.y)*.5;
+     const rx=Math.min(left.rx,right.rx)*.74, ry=Math.min(left.ry,right.ry)*.86;
+     for(let j=0;j<72;j++){
+       const a=inner()*Math.PI*2,r=Math.sqrt(inner());
+       mark(cx+Math.cos(a)*rx*r,yy+Math.sin(a)*ry*r,
+         (5+inner()*7)*scale,(2+inner()*3)*scale,(inner()-.5)*5,
+         pal[Math.floor(inner()*pal.length)],.62+inner()*.31);
+     }
+   }
+ }
+}
+ const trunks=[[-25,-5,580,.68,-.19],[22,-3,626,.73,.18],[0,0,720,.96,-.045]];
+ for(const [offset,base,h,scale,lean] of trunks){
+   const path=buildReferenceBirch(offset,base,base-h,scale,lean);
+   buildCrown('birch',offset,base,base-h,scale,path,{middleBirch:true,curvedBranches:true,crownScale:1.17,leafDensity:.83});
+   // Dark lower bark and grass visually bind the stems to their common base.
+   for(let k=0;k<65;k++){
+     const t=rnd(0,.25),p=path(t);
+     mark(p.x+rnd(-.4,.4)*p.width,p.y,rnd(4,17)*scale,rnd(1.5,5)*scale,
+       rnd(.8,2.2),pick(['#514638','#66513d','#796746']),.82*(1-t/.29));
+   }
+   // Main limbs rise from the trunk; only their outermost twigs droop.
+   const outward=lean<0?-1:1;
+   for(let k=0;k<5;k++){
+     const t=.34+k*.115+rnd(-.025,.025),p=path(t);
+     const side=k%2===0?outward:-outward;
+     const reach=rnd(162,248)*scale*(1-.23*t),rise=rnd(47,108)*scale;
+     const elbow={x:p.x+side*reach*.37,y:p.y-rise*.75};
+     const fork={x:p.x+side*reach*.69,y:p.y-rise};
+     const rootWidth=rnd(7,11)*scale;
+     stroke(p.x,p.y,elbow.x,elbow.y,rootWidth,'#534e42',1);
+     stroke(p.x,p.y-rootWidth*.21,elbow.x,elbow.y-rootWidth*.18,rootWidth*.32,'#ac9d81',.90);
+     stroke(elbow.x,elbow.y,fork.x,fork.y,rootWidth*.60,'#5e5846',1);
+     for(let j=0;j<3;j++){
+       const endX=fork.x+side*reach*rnd(.22,.42);
+       const endY=fork.y+(j-1)*rise*.34+rnd(-8,8)*scale;
+       stroke(fork.x,fork.y,endX,endY,rootWidth*.30,'#625d49',.98);
+       for(let n=0;n<4;n++){
+         const u=rnd(.46,.98),sx=fork.x+(endX-fork.x)*u,sy=fork.y+(endY-fork.y)*u;
+         const dx=side*rnd(7,23)*scale,dy=rnd(23,51)*scale;
+         stroke(sx,sy,sx+dx,sy+dy,1.4*scale,'#746e53',.9);
+         for(let leaf=0;leaf<11;leaf++){
+           const f=random();
+           mark(sx+dx*f+rnd(-9,9)*scale,sy+dy*f+rnd(-7,7)*scale,rnd(5,12)*scale,rnd(2,5)*scale,rnd(.4,2.7),pick(frontLeafColors),rnd(.63,.95));
+         }
+       }
+     }
+   }
+ }
+ for(let k=0;k<140;k++){
+   const bx=rnd(-48,53),by=rnd(-2,10),length=rnd(7,42)*(1-.35*Math.abs(bx)/53);
+   stroke(bx,by,bx+rnd(-10,12),by-length,rnd(1.1,3.1),pick(['#544731','#715b3e','#917447','#856b43']),rnd(.58,.92));
+ }
+ ctx.save();ctx.translate(x,ground);ctx.scale(height/720,height/720);
+ for(const o of ops){
+   if(o.points){ctx.beginPath();ctx.moveTo(...o.points[0]);for(const pt of o.points.slice(1))ctx.lineTo(...pt);ctx.closePath();ctx.fillStyle=o.color;ctx.fill();continue}
+   ctx.save();ctx.translate(o.x,o.y);ctx.rotate(o.a);ctx.globalAlpha=o.alpha;ctx.fillStyle=o.color;
+   const l=o.l/2,w=o.w/2;
+   ctx.beginPath();ctx.moveTo(-l,-w*.14);
+   ctx.bezierCurveTo(-l*.72,-w,l*.32,-w*1.05,l,-w*.12);
+   ctx.bezierCurveTo(l*.42,w*.36,-l*.48,w*1.22,-l,-w*.14);
+   ctx.fill();ctx.restore();
+ }
+ ctx.restore();
+}
+
+
+function vegetation(){
+ const plants=[];
+ for(let i=0;i<32;i++){
+   const side=i%2,near=i<6,dist=near?.64+.33*rand():.015+.59*rand();
+   const inset=near?rand()*.16:rand()*.40;
+   const x=W*(side?1-inset:inset),y=Math.floor(horizon(x)+dist*(H-horizon(x)));
+   const height=(16+dist*dist*480)*(.72+.5*rand()),width=height*(.34+rand()*.61);
+   if(!onSand(x,y)&&!onSand(x-width*.25,y)&&!onSand(x+width*.25,y))plants.push({x,y,height,width});
+ }
+ // Place one birch in the middle distance, clear of the sand and taller crowns.
+ const chooser=rng(seed^52971);
+ let best=null, bestGap=-Infinity;
+ for(let i=0;i<64;i++){
+   const x=W*(.10+.8*chooser()),d=.41+.19*chooser();
+   const y=Math.floor(horizon(x)+d*(H-horizon(x))),height=200+150*d+35*chooser();
+   if(onSand(x,y)||onSand(x-8,y)||onSand(x+8,y))continue;
+   const gap=Math.min(...plants.map(q=>Math.abs(q.x-x)-q.width*.45+(q.y<y?30:0)));
+   if(gap>bestGap){bestGap=gap;best={kind:'birch',x,y,height}}
+ }
+ if(best)plants.push(best);
+ return plants.sort((a,b)=>a.y-b.y);
+}
+function paint(){if(path.length<2)return;const id=++token;mode='painting';pointer=null;draft=[];$('paint').disabled=true;$('save').disabled=true;rand=rng(seed);base();sky();const p=palettes[theme];
+ mc.clearRect(0,0,W,H);drawPath(mc,path,'white');pixels=mc.getImageData(0,0,W,H).data;
+ heathWash();let px=seed%2?W*.25:W*.74,py=horizon(px)+2;pine(px,py,.64+rand()*.28);
+ drawPath(ctx,path,p[7]);const plants=vegetation();let plant=0,row=430;ctx.lineCap='round';
+ function band(){if(id!==token)return;let end=Math.min(row+8,H+52);for(;row<end;row++){while(plant<plants.length&&plants[plant].y<=row){const q=plants[plant++];if(q.kind==="birch")birch(q.x,q.y,q.height);else shrub(q.x,q.y,q.height,q.width)}for(let k=0;k<158;k++){let x=rand()*W,y=row+rand();if(y<horizon(x))continue;let d=depth(x,y),v=field(x,y),r=rand();if(onSand(x,y)){if(r>.47)stroke(x,y,x+1+rand()*(1+5*d),y-.35,d>.55?'#bd9f81':'#c1a98e',.4+d*.45);continue}
+ let col=v>.12?[p[6],'#8b737e','#a38591']:v<-.35?['#7e805d','#918666','#64694e']:['#8f806f','#978778','#8d7974'];ctx.globalAlpha=.45+rand()*.3;stroke(x,y,x+1+rand()*(1+6*d),y-.3-rand()*1.3,col[k%3],.65+d);ctx.globalAlpha=1;
+ const radius=1+46*Math.pow(d,1.24);
+ const drift=.62*field(x*.53,y*.76)+.38*v;
+ const cover=.07+.93*Math.min(1,Math.max(0,(drift+.46)*2.8));
+ if(r<Math.min(.24,8.8/(radius*radius))*cover){
+   heather(x,y,d,drift);
+   if(d>.035 && rand()<.83*cover){
+     const offset=(rand()<.5?-1:1)*radius*(.52+rand()*.77);
+     const groupSize=rand()<.6?3:2;
+     for(let n=1;n<groupSize;n++){
+       const nx=x+n*offset,ny=y+rand()*.9;
+       if(nx>=0&&nx<W&&ny>=horizon(nx)&&!onSand(nx,Math.min(H-1,ny)))heather(nx,ny,d,drift);
+     }
+   }
+ }else if(v<-.2&&r>.92){let h=2+13*d*d;stroke(x,y,x-2-rand()*h*.35,y-h*rand(),'#b0a073',.7+d*.4)}}}
+ status('De heide wordt geschilderd · '+Math.min(99,Math.round((row-430)/(H-430)*100))+'%');if(row<H+52)requestAnimationFrame(band);else{mode='done';$('save').disabled=false;status('Het doek is klaar. Bewaar het schilderij of begin op een nieuw doek.')}}requestAnimationFrame(band)}
+$('paint').onclick=paint;$('new').onclick=reset;$('example').onclick=example;$('light').onchange=()=>{theme=$('light').selectedIndex;if(mode==='edit')edit();else paint()};
+$('save').onclick=()=>canvas.toBlob(blob=>{if(!blob)return;const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='Heide-'+seed+'.png';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000)},'image/png');
+reset();
+</script></html>
